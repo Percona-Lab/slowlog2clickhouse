@@ -1,16 +1,18 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
-	"errors"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/kshvakov/clickhouse"
+	"github.com/percona/go-mysql/event"
 	slowlog "github.com/percona/go-mysql/log"
 	parser "github.com/percona/go-mysql/log/slow"
 	"github.com/percona/go-mysql/query"
@@ -18,17 +20,36 @@ import (
 
 var opt = slowlog.Options{}
 
+const agentUUID = "dc889ca7be92a66f0a00f616f69ffa7b"
+
 type closedChannelError struct {
 	error
 }
 
+type QueryClassDimentions struct {
+	DbUsername  string
+	ClientHost  string
+	PeriodStart *time.Time
+	PeriodEnd   int64
+}
+
 func main() {
+
+	// dbs := []string{"db0", "db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9"}
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	zipf9 := rand.NewZipf(r, 5, 4, 9)
+	zipf99 := rand.NewZipf(r, 5, 42, 99)
+
 	slowLogPath := flag.String("slowLogPath", "logs/mysql-slow.log", "Path to MySQL slow log file")
+	incrementByHours := flag.Int("incrementByHours", 1, "Increment slowlog timestamp by given hours")
+
+	repeatN := flag.Int("repeatN", 0, "Scan slowlog given times (when 0 will wait for new evens)")
+
 	dsn := flag.String("dsn", "clickhouse://127.0.0.1:9000?database=pmm", "DSN of ClickHouse Server")
 
 	// https://clickhouse.yandex/docs/en/single/#performance-when-inserting-data
-	maxRowsPerTx := flag.Int("max-rows-per-tx", 100000, "Maximum rows to commit per ClickHouse transaction.")
-	maxTimeForTx := flag.Duration("max-time-for-tx", 5*time.Second, "Maximum time for commit per ClickHouse transaction.")
+	// maxRowsPerTx := flag.Int("max-rows-per-tx", 100000, "Maximum rows to commit per ClickHouse transaction.")
+	// maxTimeForTx := flag.Duration("max-time-for-tx", 5*time.Second, "Maximum time for commit per ClickHouse transaction.")
 	newEventWait := flag.Duration("new-event-wait", 10*time.Second, "Time to wait for a new event in slow log.")
 	offset := flag.Uint64("offset", 0, "Offset of slowlog")
 	flag.Parse()
@@ -43,30 +64,297 @@ func main() {
 
 	events := parseSlowLog(*slowLogPath, opt)
 	fmt.Println("Parsing slowlog: ", *slowLogPath, "...")
+	iteration := 0
 	for {
-		start := time.Now()
+		// start := time.Now()
 		err = transact(db, func(stmt *sqlx.NamedStmt) error {
 			i := 0
-			for event := range events {
-				_, err = stmt.Exec(prepareQueryClassRow(event))
-				if err != nil {
-					return fmt.Errorf("save error: %v", err)
-				}
+			aggregator := event.NewAggregator(true, 0, 1)
+			qcDimentions := map[string]*QueryClassDimentions{}
+			prewTs := time.Time{}
+			for e := range events {
+
+				fingerprint := query.Fingerprint(e.Query)
+				digest := query.Id(fingerprint)
+				duration := time.Duration(iteration * (*incrementByHours))
+				e.Ts = e.Ts.Add(duration * time.Hour)
+
+				aggregator.AddEvent(e, digest, fingerprint)
 
 				// Pass last offset to restart reader when reached out end of slowlog.
-				opt.StartOffset = event.OffsetEnd
+				opt.StartOffset = e.OffsetEnd
+
+				qcd := &QueryClassDimentions{
+					DbUsername: e.User,
+					ClientHost: e.Host,
+					PeriodEnd:  e.Ts.UnixNano(),
+				}
+
+				qcDimentions[digest] = qcd
+				if qcDimentions[digest].PeriodStart == nil {
+					qcDimentions[digest].PeriodStart = &e.Ts
+				}
 
 				i++
 				// Commit all executed entities by number or timeout (when slow log is filling rarely)
 				// https://clickhouse.yandex/docs/en/single/#performance-when-inserting-data
-				if i >= *maxRowsPerTx || time.Since(start) > *maxTimeForTx {
-					return nil
+				// if i >= *maxRowsPerTx || time.Since(start) > *maxTimeForTx {
+				// 	fmt.Printf("offset: %v\n", opt.StartOffset)
+				// 	break
+				// }
+
+				if prewTs.IsZero() {
+					prewTs = e.Ts
+				}
+
+				if e.Ts.Sub(prewTs).Minutes() > 1 {
+					prewTs = e.Ts
+					break
 				}
 			}
+
 			// No new events in slowlog. Nothing to save in ClickHouse.
 			if i == 0 {
+				fmt.Println("end of log")
 				return closedChannelError{errors.New("closed channel")}
 			}
+
+			r := aggregator.Finalize()
+
+			for k, v := range r.Class {
+				n := rand.Intn(9)
+				labelKeys := []string{}
+				labelVals := []string{}
+				for i := 1; i <= n; i++ {
+					labelKeys = append(labelKeys, fmt.Sprintf("key%v", zipf9.Uint64()+1))
+					labelVals = append(labelVals, fmt.Sprintf("label%v", zipf9.Uint64()+1))
+				}
+
+				qc := queryClassRow{
+					Digest:       k,
+					DigestText:   v.Fingerprint,
+					DbSchema:     fmt.Sprintf("schema%v", zipf99.Uint64()+1), // fake data
+					DbUsername:   qcDimentions[k].DbUsername,
+					ClientHost:   fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1), // fake data
+					DbServer:     fmt.Sprintf("db%v", zipf9.Uint64()+1),         // fake data
+					LabelsKey:    labelKeys,
+					LabelsValue:  labelVals,
+					AgentUUID:    agentUUID,
+					PeriodStart:  *qcDimentions[k].PeriodStart,
+					PeriodLength: uint32(qcDimentions[k].PeriodStart.Sub(prewTs).Seconds()),
+					Example:      v.Example.Query,
+					NumQueries:   uint64(v.TotalQueries),
+				}
+
+				t, _ := time.Parse("2006-01-02 15:04:05", v.Example.Ts)
+				qc.PeriodStart = t
+
+				// If key has suffix _time or _wait than field is TimeMetrics.
+				// For Boolean metrics exists only Sum.
+				// https://www.percona.com/doc/percona-server/5.7/diagnostics/slow_extended.html
+				// TimeMetrics: query_time, lock_time, rows_sent, innodb_io_r_wait, innodb_rec_lock_wait, innodb_queue_wait.
+				// NumberMetrics: rows_examined, rows_affected, rows_read, merge_passes, innodb_io_r_ops, innodb_io_r_bytes,
+				// innodb_pages_distinct, query_length, bytes_sent, tmp_tables, tmp_disk_tables, tmp_table_sizes.
+				// BooleanMetrics: qc_hit, full_scan, full_join, tmp_table, tmp_table_on_disk, filesort, filesort_on_disk,
+				// select_full_range_join, select_range, select_range_check, sort_range, sort_rows, sort_scan,
+				// no_index_used, no_good_index_used.
+
+				// query_time - Query_time
+				if m, ok := v.Metrics.TimeMetrics["Query_time"]; ok {
+					qc.MQueryTimeSum = float32(m.Sum)
+					qc.MQueryTimeMax = float32(*m.Max)
+					qc.MQueryTimeMin = float32(*m.Min)
+					qc.MQueryTimeP99 = float32(*m.P95)
+				}
+				// lock_time - Lock_time
+				if m, ok := v.Metrics.TimeMetrics["Lock_time"]; ok {
+					qc.MLockTimeSum = float32(m.Sum)
+					qc.MLockTimeMax = float32(*m.Max)
+					qc.MLockTimeMin = float32(*m.Min)
+					qc.MLockTimeP99 = float32(*m.P95)
+				}
+				// rows_sent - Rows_sent
+				if m, ok := v.Metrics.NumberMetrics["Rows_sent"]; ok {
+					qc.MRowsSentSum = m.Sum
+					qc.MRowsSentMax = *m.Max
+					qc.MRowsSentMin = *m.Min
+					qc.MRowsSentP99 = *m.P95
+				}
+				// rows_examined - Rows_examined
+				if m, ok := v.Metrics.NumberMetrics["Rows_examined"]; ok {
+					qc.MRowsExaminedSum = m.Sum
+					qc.MRowsExaminedMax = *m.Max
+					qc.MRowsExaminedMin = *m.Min
+					qc.MRowsExaminedP99 = *m.P95
+				}
+				// rows_affected - Rows_affected
+				if m, ok := v.Metrics.NumberMetrics["Rows_affected"]; ok {
+					qc.MRowsAffectedSum = m.Sum
+					qc.MRowsAffectedMax = *m.Max
+					qc.MRowsAffectedMin = *m.Min
+					qc.MRowsAffectedP99 = *m.P95
+				}
+				// rows_read - Rows_read
+				if m, ok := v.Metrics.NumberMetrics["Rows_read"]; ok {
+					qc.MRowsReadSum = m.Sum
+					qc.MRowsReadMax = *m.Max
+					qc.MRowsReadMin = *m.Min
+					qc.MRowsReadP99 = *m.P95
+				}
+				// merge_passes - Merge_passes
+				if m, ok := v.Metrics.NumberMetrics["Merge_passes"]; ok {
+					qc.MMergePassesSum = m.Sum
+					qc.MMergePassesMax = *m.Max
+					qc.MMergePassesMin = *m.Min
+					qc.MMergePassesP99 = *m.P95
+				}
+				// innodb_io_r_ops - InnoDB_IO_r_ops
+				if m, ok := v.Metrics.NumberMetrics["InnoDB_IO_r_ops"]; ok {
+					qc.MInnodbIoROpsSum = m.Sum
+					qc.MInnodbIoROpsMax = *m.Max
+					qc.MInnodbIoROpsMin = *m.Min
+					qc.MInnodbIoROpsP99 = *m.P95
+				}
+				// innodb_io_r_bytes - InnoDB_IO_r_bytes
+				if m, ok := v.Metrics.NumberMetrics["InnoDB_IO_r_bytes"]; ok {
+					qc.MInnodbIoRBytesSum = m.Sum
+					qc.MInnodbIoRBytesMax = *m.Max
+					qc.MInnodbIoRBytesMin = *m.Min
+					qc.MInnodbIoRBytesP99 = *m.P95
+				}
+				// innodb_io_r_wait - InnoDB_IO_r_wait
+				if m, ok := v.Metrics.TimeMetrics["InnoDB_IO_r_wait"]; ok {
+					qc.MInnodbIoRWaitSum = float32(m.Sum)
+					qc.MInnodbIoRWaitMax = float32(*m.Max)
+					qc.MInnodbIoRWaitMin = float32(*m.Min)
+					qc.MInnodbIoRWaitP99 = float32(*m.P95)
+				}
+				// innodb_rec_lock_wait - InnoDB_rec_lock_wait
+				if m, ok := v.Metrics.TimeMetrics["InnoDB_rec_lock_wait"]; ok {
+					qc.MInnodbRecLockWaitSum = float32(m.Sum)
+					qc.MInnodbRecLockWaitMax = float32(*m.Max)
+					qc.MInnodbRecLockWaitMin = float32(*m.Min)
+					qc.MInnodbRecLockWaitP99 = float32(*m.P95)
+				}
+				// innodb_queue_wait - InnoDB_queue_wait
+				if m, ok := v.Metrics.TimeMetrics["InnoDB_queue_wait"]; ok {
+					qc.MInnodbQueueWaitSum = float32(m.Sum)
+					qc.MInnodbQueueWaitMax = float32(*m.Max)
+					qc.MInnodbQueueWaitMin = float32(*m.Min)
+					qc.MInnodbQueueWaitP99 = float32(*m.P95)
+				}
+				// innodb_pages_distinct - InnoDB_pages_distinct
+				if m, ok := v.Metrics.NumberMetrics["InnoDB_pages_distinct"]; ok {
+					qc.MInnodbPagesDistinctSum = m.Sum
+					qc.MInnodbPagesDistinctMax = *m.Max
+					qc.MInnodbPagesDistinctMin = *m.Min
+					qc.MInnodbPagesDistinctP99 = *m.P95
+				}
+				// query_length - Query_length
+				if m, ok := v.Metrics.NumberMetrics["Query_length"]; ok {
+					qc.MQueryLengthSum = m.Sum
+					qc.MQueryLengthMax = *m.Max
+					qc.MQueryLengthMin = *m.Min
+					qc.MQueryLengthP99 = *m.P95
+				}
+				// bytes_sent - Bytes_sent
+				if m, ok := v.Metrics.NumberMetrics["Bytes_sent"]; ok {
+					qc.MBytesSentSum = m.Sum
+					qc.MBytesSentMax = *m.Max
+					qc.MBytesSentMin = *m.Min
+					qc.MBytesSentP99 = *m.P95
+				}
+				// tmp_tables - Tmp_tables
+				if m, ok := v.Metrics.NumberMetrics["Tmp_tables"]; ok {
+					qc.MTmpTablesSum = m.Sum
+					qc.MTmpTablesMax = *m.Max
+					qc.MTmpTablesMin = *m.Min
+					qc.MTmpTablesP99 = *m.P95
+				}
+				// tmp_disk_tables - Tmp_disk_tables
+				if m, ok := v.Metrics.NumberMetrics["Tmp_disk_tables"]; ok {
+					qc.MTmpDiskTablesSum = m.Sum
+					qc.MTmpDiskTablesMax = *m.Max
+					qc.MTmpDiskTablesMin = *m.Min
+					qc.MTmpDiskTablesP99 = *m.P95
+				}
+				// tmp_table_sizes - Tmp_table_sizes
+				if m, ok := v.Metrics.NumberMetrics["Tmp_table_sizes"]; ok {
+					qc.MTmpTableSizesSum = m.Sum
+					qc.MTmpTableSizesMax = *m.Max
+					qc.MTmpTableSizesMin = *m.Min
+					qc.MTmpTableSizesP99 = *m.P95
+				}
+				// qc_hit - QC_Hit
+				if m, ok := v.Metrics.BoolMetrics["QC_Hit"]; ok {
+					qc.MQcHitSum = m.Sum
+				}
+				// full_scan - Full_scan
+				if m, ok := v.Metrics.BoolMetrics["Full_scan"]; ok {
+					qc.MFullScanSum = m.Sum
+				}
+				// full_join - Full_join
+				if m, ok := v.Metrics.BoolMetrics["Full_join"]; ok {
+					qc.MFullJoinSum = m.Sum
+				}
+				// tmp_table - Tmp_table
+				if m, ok := v.Metrics.BoolMetrics["Tmp_table"]; ok {
+					qc.MTmpTableSum = m.Sum
+				}
+				// tmp_table_on_disk - Tmp_table_on_disk
+				if m, ok := v.Metrics.BoolMetrics["Tmp_table_on_disk"]; ok {
+					qc.MTmpTableOnDiskSum = m.Sum
+				}
+				// filesort - Filesort
+				if m, ok := v.Metrics.BoolMetrics["Filesort"]; ok {
+					qc.MFilesortSum = m.Sum
+				}
+				// filesort_on_disk - Filesort_on_disk
+				if m, ok := v.Metrics.BoolMetrics["Filesort_on_disk"]; ok {
+					qc.MFilesortOnDiskSum = m.Sum
+				}
+				// select_full_range_join - Select_full_range_join
+				if m, ok := v.Metrics.BoolMetrics["Select_full_range_join"]; ok {
+					qc.MSelectFullRangeJoinSum = m.Sum
+				}
+				// select_range - Select_range
+				if m, ok := v.Metrics.BoolMetrics["Select_range"]; ok {
+					qc.MSelectRangeSum = m.Sum
+				}
+				// select_range_check - Select_range_check
+				if m, ok := v.Metrics.BoolMetrics["Select_range_check"]; ok {
+					qc.MSelectRangeCheckSum = m.Sum
+				}
+				// sort_range - Sort_range
+				if m, ok := v.Metrics.BoolMetrics["Sort_range"]; ok {
+					qc.MSortRangeSum = m.Sum
+				}
+				// sort_rows - Sort_rows
+				if m, ok := v.Metrics.BoolMetrics["Sort_rows"]; ok {
+					qc.MSortRowsSum = m.Sum
+				}
+				// sort_scan - Sort_scan
+				if m, ok := v.Metrics.BoolMetrics["Sort_scan"]; ok {
+					qc.MSortScanSum = m.Sum
+				}
+				// no_index_used - No_index_used
+				if m, ok := v.Metrics.BoolMetrics["No_index_used"]; ok {
+					qc.MNoIndexUsedSum = m.Sum
+				}
+				// no_good_index_used - No_good_index_used
+				if m, ok := v.Metrics.BoolMetrics["No_good_index_used"]; ok {
+					qc.MNoGoodIndexUsedSum = m.Sum
+				}
+
+				fmt.Printf("QC: %+v \n", qc.Digest)
+				_, err = stmt.Exec(qc)
+				if err != nil {
+					return fmt.Errorf("save error: %v", err)
+				}
+
+				// am.QueryClass = append(am.QueryClass, qc)
+			}
+
 			// Reached end of slowlog. Save all what we have in ClickHouse.
 			return nil
 		})
@@ -77,9 +365,22 @@ func main() {
 			}
 			// Channel is closed when reached end of the slowlog.
 			// Wait and try read the slowlog again.
-			time.Sleep(*newEventWait)
-			events = parseSlowLog(*slowLogPath, opt)
+			if *repeatN > 0 {
+				iteration++
+				if iteration >= *repeatN {
+					fmt.Printf("slowlogs scanned %v times.", iteration)
+					os.Exit(1)
+				}
+
+				fmt.Println("Next iteration.")
+				opt.StartOffset = 0
+				events = parseSlowLog(*slowLogPath, opt)
+			} else {
+				time.Sleep(*newEventWait)
+				events = parseSlowLog(*slowLogPath, opt)
+			}
 		}
+
 	}
 }
 
@@ -123,7 +424,7 @@ func transact(db *sqlx.DB, txFunc func(*sqlx.NamedStmt) error) (err error) {
 	}
 	defer func() {
 		if p := recover(); p != nil {
-			if err := tx.Rollback(); err!= nil {
+			if err := tx.Rollback(); err != nil {
 				log.Println(err)
 			}
 			panic(p) // re-throw panic after Rollback
@@ -139,6 +440,10 @@ func transact(db *sqlx.DB, txFunc func(*sqlx.NamedStmt) error) (err error) {
 					err = fmt.Errorf("%v:rollback error: %v", err, e)
 				}
 			}
+
+			if _, ok := err.(closedChannelError); ok {
+				fmt.Println("End of slow log")
+			}
 			return
 		}
 
@@ -151,7 +456,7 @@ func transact(db *sqlx.DB, txFunc func(*sqlx.NamedStmt) error) (err error) {
 		if err != nil {
 			err = fmt.Errorf("cannot commit: %v", err)
 		}
-		fmt.Println("Commit to ClickHouse.")
+		fmt.Println("Commit to ClickHouse")
 	}()
 	return txFunc(stmt)
 }

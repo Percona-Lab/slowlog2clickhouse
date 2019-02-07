@@ -18,5 +18,7 @@ run: build
 	./slowlog2clickhouse
 
 build:
-	go build -o slowlog2clickhouse main.go 
+	go build -o slowlog2clickhouse main.go
 
+build-linux:
+	GOOS=linux go build -o slowlog2clickhouse main.go
