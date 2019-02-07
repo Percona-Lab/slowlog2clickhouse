@@ -30,9 +30,10 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:f205e4ea58715ac6f218a6f5397b798f317c2948685fabdd4ffdf34039199b7e"
+  digest = "1:37e7d147e1ff52e3e305a39ba486f96fdf01ad53382ef7852c321b84838ec8b2"
   name = "github.com/percona/go-mysql"
   packages = [
+    "event",
     "log",
     "log/slow",
     "query",
@@ -46,6 +47,7 @@
   input-imports = [
     "github.com/jmoiron/sqlx",
     "github.com/kshvakov/clickhouse",
+    "github.com/percona/go-mysql/event",
     "github.com/percona/go-mysql/log",
     "github.com/percona/go-mysql/log/slow",
     "github.com/percona/go-mysql/query",
