@@ -35,10 +35,9 @@ type QueryClassDimentions struct {
 
 func main() {
 
-	// dbs := []string{"db0", "db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9"}
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	zipf9 := rand.NewZipf(r, 5, 4, 9)
-	zipf99 := rand.NewZipf(r, 5, 42, 99)
+	// zipf9 := rand.NewZipf(r, 5, 4, 9)
+	// zipf99 := rand.NewZipf(r, 5, 42, 99)
 
 	slowLogPath := flag.String("slowLogPath", "logs/mysql-slow.log", "Path to MySQL slow log file")
 	incrementByHours := flag.Int("incrementByHours", 1, "Increment slowlog timestamp by given hours")
@@ -54,6 +53,7 @@ func main() {
 	offset := flag.Uint64("offset", 0, "Offset of slowlog")
 	flag.Parse()
 	opt.StartOffset = *offset
+	opt.Debug = false
 
 	log.SetOutput(os.Stderr)
 	db, err := sqlx.Connect("clickhouse", *dsn)
@@ -66,12 +66,13 @@ func main() {
 	fmt.Println("Parsing slowlog: ", *slowLogPath, "...")
 	iteration := 0
 	for {
-		// start := time.Now()
+
 		err = transact(db, func(stmt *sqlx.NamedStmt) error {
 			i := 0
-			aggregator := event.NewAggregator(true, 0, 1)
-			qcDimentions := map[string]*QueryClassDimentions{}
+			aggregator := event.NewAggregator(true, 0, 0)
+			// qcDimentions := map[string]*QueryClassDimentions{}
 			prewTs := time.Time{}
+			fmt.Println("Parsing slow log...")
 			for e := range events {
 
 				fingerprint := query.Fingerprint(e.Query)
@@ -79,21 +80,33 @@ func main() {
 				duration := time.Duration(iteration * (*incrementByHours))
 				e.Ts = e.Ts.Add(duration * time.Hour)
 
-				aggregator.AddEvent(e, digest, fingerprint)
+				// e.Db = fmt.Sprintf("schema%v", zipf99.Uint64()+1)      // fake data
+				// e.User = fmt.Sprintf("user%v", zipf99.Uint64()+1)      // fake data
+				// e.Server = fmt.Sprintf("db%v", zipf9.Uint64()+1)       // fake data
+				// e.Host = fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1) // fake data
+
+				e.Db = fmt.Sprintf("schema%v", r.Intn(10))      // fake data 100
+				e.User = fmt.Sprintf("user%v", r.Intn(10))      // fake data 100
+				e.Host = fmt.Sprintf("10.11.12.%v", r.Intn(10)) // fake data 100
+				e.Server = fmt.Sprintf("db%v", r.Intn(10))      // fake data 10
+
+				aggregator.AddEvent(e, digest, e.User, e.Host, e.Db, e.Server, fingerprint)
 
 				// Pass last offset to restart reader when reached out end of slowlog.
 				opt.StartOffset = e.OffsetEnd
 
-				qcd := &QueryClassDimentions{
-					DbUsername: e.User,
-					ClientHost: e.Host,
-					PeriodEnd:  e.Ts.UnixNano(),
-				}
+				// ident := fmt.Sprintf("%s;%s;%s;%s;%s", digest, e.User, e.Host, e.Db, e.Server)
 
-				qcDimentions[digest] = qcd
-				if qcDimentions[digest].PeriodStart == nil {
-					qcDimentions[digest].PeriodStart = &e.Ts
-				}
+				// qcd := &QueryClassDimentions{
+				// 	DbUsername: e.User,
+				// 	ClientHost: e.Host,
+				// 	PeriodEnd:  e.Ts.UnixNano(),
+				// }
+
+				// qcDimentions[ident] = qcd
+				// if qcDimentions[ident].PeriodStart == nil {
+				// 	qcDimentions[ident].PeriodStart = &e.Ts
+				// }
 
 				i++
 				// Commit all executed entities by number or timeout (when slow log is filling rarely)
@@ -107,7 +120,7 @@ func main() {
 					prewTs = e.Ts
 				}
 
-				if e.Ts.Sub(prewTs).Minutes() > 1 {
+				if e.Ts.Sub(prewTs).Seconds() > 59 {
 					prewTs = e.Ts
 					break
 				}
@@ -119,35 +132,39 @@ func main() {
 				return closedChannelError{errors.New("closed channel")}
 			}
 
+			fmt.Printf("Parsed %v queries\n", i)
+
 			r := aggregator.Finalize()
 
-			for k, v := range r.Class {
-				n := rand.Intn(9)
-				labelKeys := []string{}
-				labelVals := []string{}
-				for i := 1; i <= n; i++ {
-					labelKeys = append(labelKeys, fmt.Sprintf("key%v", zipf9.Uint64()+1))
-					labelVals = append(labelVals, fmt.Sprintf("label%v", zipf9.Uint64()+1))
-				}
+			j := 0
+			for _, v := range r.Class {
+				j++
+				// n := rand.Intn(9)
+				// labelKeys := []string{}
+				// labelVals := []string{}
+				// for i := 1; i <= n; i++ {
+				// 	labelKeys = append(labelKeys, fmt.Sprintf("key%v", zipf9.Uint64()+1))
+				// 	labelVals = append(labelVals, fmt.Sprintf("label%v", zipf9.Uint64()+1))
+				// }
 
-				qc := queryClassRow{
-					Digest:       k,
-					DigestText:   v.Fingerprint,
-					DbSchema:     fmt.Sprintf("schema%v", zipf99.Uint64()+1), // fake data
-					DbUsername:   qcDimentions[k].DbUsername,
-					ClientHost:   fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1), // fake data
-					DbServer:     fmt.Sprintf("db%v", zipf9.Uint64()+1),         // fake data
-					LabelsKey:    labelKeys,
-					LabelsValue:  labelVals,
-					AgentUUID:    agentUUID,
-					PeriodStart:  *qcDimentions[k].PeriodStart,
-					PeriodLength: uint32(qcDimentions[k].PeriodStart.Sub(prewTs).Seconds()),
+				t, _ := time.Parse("2006-01-02 15:04:05", v.Example.Ts)
+				qc := &queryClassRow{
+					Digest:     v.Id,
+					DigestText: v.Fingerprint,
+					DbSchema:   v.Db,
+					DbUsername: v.User,
+					ClientHost: v.Host,
+					DbServer:   v.Server,
+					// LabelsKey:   labelKeys,
+					// LabelsValue: labelVals,
+					AgentUUID: agentUUID,
+					// PeriodStart:  *qcDimentions[k].PeriodStart,
+					PeriodStart: t,
+					// PeriodLength: uint32(qcDimentions[k].PeriodStart.Sub(prewTs).Seconds()),
+					PeriodLength: uint32(60),
 					Example:      v.Example.Query,
 					NumQueries:   uint64(v.TotalQueries),
 				}
-
-				t, _ := time.Parse("2006-01-02 15:04:05", v.Example.Ts)
-				qc.PeriodStart = t
 
 				// If key has suffix _time or _wait than field is TimeMetrics.
 				// For Boolean metrics exists only Sum.
@@ -346,14 +363,13 @@ func main() {
 					qc.MNoGoodIndexUsedSum = m.Sum
 				}
 
-				fmt.Printf("QC: %+v \n", qc.Digest)
 				_, err = stmt.Exec(qc)
 				if err != nil {
 					return fmt.Errorf("save error: %v", err)
 				}
 
-				// am.QueryClass = append(am.QueryClass, qc)
 			}
+			fmt.Printf("Aggregated %v query classes\n", j)
 
 			// Reached end of slowlog. Save all what we have in ClickHouse.
 			return nil
@@ -384,6 +400,7 @@ func main() {
 	}
 }
 
+/*
 func prepareQueryClassRow(e *slowlog.Event) queryClassRow {
 	fingerprint := query.Fingerprint(e.Query)
 	digest := query.Id(fingerprint)
@@ -411,6 +428,7 @@ func prepareQueryClassRow(e *slowlog.Event) queryClassRow {
 		MBytesSentSum:    e.NumberMetrics["Bytes_sent"],
 	}
 }
+*/
 
 // https://stackoverflow.com/questions/16184238/database-sql-tx-detecting-commit-or-rollback/23502629#23502629
 func transact(db *sqlx.DB, txFunc func(*sqlx.NamedStmt) error) (err error) {

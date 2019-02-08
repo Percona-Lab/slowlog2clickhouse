@@ -33,7 +33,7 @@ services:
                 --port=3306 \
                 --user=root \
                 --password=secret \
-                -e 'CREATE DATABASE IF NOT EXISTS sbtest; SET GLOBAL slow_query_log_file = \"/var/log/mysql/mysql-slow.log\"; SET GLOBAL slow_query_log = \"ON\";  SET GLOBAL slow_query_log_always_write_time = 0;'
+                -e 'CREATE DATABASE IF NOT EXISTS sbtest; SET GLOBAL slow_query_log_file = \"/var/log/mysql/mysql-slow.log\"; SET GLOBAL slow_query_log = \"ON\";  SET GLOBAL slow_query_log_always_write_time = 0;  SET GLOBAL log_slow_verbosity = \"full\"; SET GLOBAL long_query_time = 0;'
             sysbench \
                 --db-driver=mysql \
                 --mysql-host=ps \
@@ -42,7 +42,7 @@ services:
                 --mysql-password=secret \
                 --mysql-db=sbtest \
                 --mysql-table-engine=innodb \
-                --oltp-table-size=1000000 \
+                --oltp-table-size=10000 \
                 /usr/share/sysbench/tests/include/oltp_legacy/oltp.lua \
                 prepare
             sysbench \
@@ -60,7 +60,7 @@ services:
                 --mysql-db=sbtest \
                 --mysql-table-engine=innodb \
                 --oltp-reconnect \
-                --oltp-table-size=1000000 \
+                --oltp-table-size=10000 \
                 /usr/share/sysbench/tests/include/oltp_legacy/select.lua \
                 run
         "
@@ -81,6 +81,24 @@ services:
                 -e 'CREATE DATABASE IF NOT EXISTS sbtest; SET GLOBAL slow_query_log_file = \"/var/log/mysql/mysql-slow.log\"; SET GLOBAL slow_query_log = \"ON\";  SET GLOBAL slow_query_log_always_write_time = 0;'
             cd /sysbench/sysbench-tpcc
            ./tpcc.lua --mysql-host=ps --mysql-port=3306 --mysql-user=root --mysql-password=secret --mysql-db=sbtest --time=300 --threads=64 --report-interval=1 --tables=10 --scale=100 --db-driver=mysql prepare
+           ./tpcc.lua --mysql-host=ps --mysql-port=3306 --mysql-user=root --mysql-password=secret --mysql-db=sbtest --time=300 --threads=64 --report-interval=1 --tables=10 --scale=100 --db-driver=mysql run
+        "
+
+
+  tpcc-run:
+    image: "perconalab/sysbench"
+    depends_on:
+     - "ps"
+    command: >
+        bash -c "
+            set -o xtrace
+            mysql \
+                --host=ps \
+                --port=3306 \
+                --user=root \
+                --password=secret \
+                -e 'CREATE DATABASE IF NOT EXISTS sbtest; SET GLOBAL slow_query_log_file = \"/var/log/mysql/mysql-slow.log\"; SET GLOBAL slow_query_log = \"ON\";  SET GLOBAL slow_query_log_always_write_time = 0; SET GLOBAL log_slow_verbosity = \"full\"; SET GLOBAL long_query_time = 0;'
+            cd /sysbench/sysbench-tpcc
            ./tpcc.lua --mysql-host=ps --mysql-port=3306 --mysql-user=root --mysql-password=secret --mysql-db=sbtest --time=300 --threads=64 --report-interval=1 --tables=10 --scale=100 --db-driver=mysql run
         "
 
