@@ -20,10 +20,6 @@ var opt = slowlog.Options{}
 
 const agentUUID = "dc889ca7be92a66f0a00f616f69ffa7b"
 
-type closedChannelError struct {
-	error
-}
-
 func main() {
 	slowLogPath := flag.String("slowLogPath", "logs/mysql-slow.log", "Path to MySQL slow log file")
 	dsn := flag.String("dsn", "clickhouse://127.0.0.1:9000?database=pmm", "DSN of ClickHouse Server")
