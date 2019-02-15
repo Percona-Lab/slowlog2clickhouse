@@ -101,12 +101,12 @@ func main() {
 
 		// No new events in slowlog. Nothing to save in ClickHouse. New iteration.
 		if i == 0 {
-			iteration++
 			fmt.Printf("Iteration %d of %d \n", iteration, *repeatN)
 			if iteration > *repeatN {
 				fmt.Printf("Done. Total Iterations %v \n", iteration)
 				break
 			}
+			iteration++
 			opt.StartOffset = 0
 			events = parseSlowLog(*slowLogPath, opt)
 			continue
@@ -174,7 +174,13 @@ func main() {
 // select_full_range_join, select_range, select_range_check, sort_range, sort_rows, sort_scan,
 // no_index_used, no_good_index_used.
 func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []interface{} {
-	// t, _ := time.Parse("2006-01-02 15:04:05", v.Example.Ts)
+
+	numQueriesWithErrors := float32(0)
+	if m, ok := v.Metrics.NumberMetrics["Last_errno"]; ok {
+		numQueriesWithErrors = float32(m.Cnt)
+		// fmt.Printf("\n\nLast_errno: %+v \n\n", m)
+		// errorsCodes = m.vals
+	}
 	args := []interface{}{
 		v.Id,                                  // digest
 		v.Fingerprint,                         // digest_text
@@ -185,15 +191,16 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 		v.LabelsKey,                           // labels_key
 		v.LabelsValue,                         // labels_value
 		agentUUID,                             // agent_uuid
+		"percona_server_log",                  // metrics_source
 		periodStart.Truncate(1 * time.Minute), // period_start
-		float32(60),                           // period_length
+		uint32(60),                            // period_length
 		v.Example.Query,                       // example
 		0,                                     // is_truncated
 		"",                                    // example_metrics
 		float32(0),                            // num_queries_with_warnings
 		[]string{},                            // warnings_code
 		[]string{},                            // warnings_count
-		float32(0),                            // num_query_with_errors
+		numQueriesWithErrors,                  // num_queries_with_errors
 		[]string{},                            // errors_code
 		[]string{},                            // errors_count
 		numQueries,                            // num_queries
@@ -221,13 +228,13 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 	}
 
 	for _, mName := range metricNames {
-		a := []interface{}{float32(0), float32(0), float32(0), float32(0), float32(0), []float32{}}
+		a := []interface{}{float32(0), float32(0), float32(0), float32(0), float32(0)}
 		if m, ok := v.Metrics.NumberMetrics[mName]; ok {
-			a = []interface{}{float32(0), float32(m.Sum), float32(*m.Min), float32(*m.Max), float32(*m.P95), []float32{}}
+			a = []interface{}{float32(m.Cnt), float32(m.Sum), float32(*m.Min), float32(*m.Max), float32(*m.P99)}
 		}
 		// in case of "_wait" suffix
 		if m, ok := v.Metrics.TimeMetrics[mName]; ok {
-			a = []interface{}{float32(0), float32(m.Sum), float32(*m.Min), float32(*m.Max), float32(*m.P95), []float32{}}
+			a = []interface{}{float32(m.Cnt), float32(m.Sum), float32(*m.Min), float32(*m.Max), float32(*m.P99)}
 		}
 		args = append(args, a...)
 	}
@@ -256,10 +263,6 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 		}
 		args = append(args, sum)
 	}
-
-	// grpstr, grpint, labint_key, labint_value
-	a := []interface{}{"", float32(0), []float32{}, []float32{}}
-	args = append(args, a...)
 	return args
 }
 
@@ -290,6 +293,7 @@ const insertSQL = `
 	labels.key,
 	labels.value,
 	agent_uuid,
+	metrics_source,
 	period_start,
 	period_length,
 	example,
@@ -298,7 +302,7 @@ const insertSQL = `
 	num_queries_with_warnings,
 	warnings.code,
 	warnings.count,
-	num_query_with_errors,
+	num_queries_with_errors,
 	errors.code,
 	errors.count,
 	num_queries,
@@ -307,109 +311,91 @@ const insertSQL = `
 	m_query_time_min,
 	m_query_time_max,
 	m_query_time_p99,
-	m_query_time_hg,
 	m_lock_time_cnt,
 	m_lock_time_sum,
 	m_lock_time_min,
 	m_lock_time_max,
 	m_lock_time_p99,
-	m_lock_time_hg,
 	m_rows_sent_cnt,
 	m_rows_sent_sum,
 	m_rows_sent_min,
 	m_rows_sent_max,
 	m_rows_sent_p99,
-	m_rows_sent_hg,
 	m_rows_examined_cnt,
 	m_rows_examined_sum,
 	m_rows_examined_min,
 	m_rows_examined_max,
 	m_rows_examined_p99,
-	m_rows_examined_hg,
 	m_rows_affected_cnt,
 	m_rows_affected_sum,
 	m_rows_affected_min,
 	m_rows_affected_max,
 	m_rows_affected_p99,
-	m_rows_affected_hg,
 	m_rows_read_cnt,
 	m_rows_read_sum,
 	m_rows_read_min,
 	m_rows_read_max,
 	m_rows_read_p99,
-	m_rows_read_hg,
 	m_merge_passes_cnt,
 	m_merge_passes_sum,
 	m_merge_passes_min,
 	m_merge_passes_max,
 	m_merge_passes_p99,
-	m_merge_passes_hg,
 	m_innodb_io_r_ops_cnt,
 	m_innodb_io_r_ops_sum,
 	m_innodb_io_r_ops_min,
 	m_innodb_io_r_ops_max,
 	m_innodb_io_r_ops_p99,
-	m_innodb_io_r_ops_hg,
 	m_innodb_io_r_bytes_cnt,
 	m_innodb_io_r_bytes_sum,
 	m_innodb_io_r_bytes_min,
 	m_innodb_io_r_bytes_max,
 	m_innodb_io_r_bytes_p99,
-	m_innodb_io_r_bytes_hg,
 	m_innodb_io_r_wait_cnt,
 	m_innodb_io_r_wait_sum,
 	m_innodb_io_r_wait_min,
 	m_innodb_io_r_wait_max,
 	m_innodb_io_r_wait_p99,
-	m_innodb_io_r_wait_hg,
 	m_innodb_rec_lock_wait_cnt,
 	m_innodb_rec_lock_wait_sum,
 	m_innodb_rec_lock_wait_min,
 	m_innodb_rec_lock_wait_max,
 	m_innodb_rec_lock_wait_p99,
-	m_innodb_rec_lock_wait_hg,
 	m_innodb_queue_wait_cnt,
 	m_innodb_queue_wait_sum,
 	m_innodb_queue_wait_min,
 	m_innodb_queue_wait_max,
 	m_innodb_queue_wait_p99,
-	m_innodb_queue_wait_hg,
 	m_innodb_pages_distinct_cnt,
 	m_innodb_pages_distinct_sum,
 	m_innodb_pages_distinct_min,
 	m_innodb_pages_distinct_max,
 	m_innodb_pages_distinct_p99,
-	m_innodb_pages_distinct_hg,
 	m_query_length_cnt,
 	m_query_length_sum,
 	m_query_length_min,
 	m_query_length_max,
 	m_query_length_p99,
-	m_query_length_hg,
 	m_bytes_sent_cnt,
 	m_bytes_sent_sum,
 	m_bytes_sent_min,
 	m_bytes_sent_max,
 	m_bytes_sent_p99,
-	m_bytes_sent_hg,
 	m_tmp_tables_cnt,
 	m_tmp_tables_sum,
 	m_tmp_tables_min,
 	m_tmp_tables_max,
 	m_tmp_tables_p99,
-	m_tmp_tables_hg,
 	m_tmp_disk_tables_cnt,
 	m_tmp_disk_tables_sum,
 	m_tmp_disk_tables_min,
 	m_tmp_disk_tables_max,
 	m_tmp_disk_tables_p99,
-	m_tmp_disk_tables_hg,
 	m_tmp_table_sizes_cnt,
 	m_tmp_table_sizes_sum,
 	m_tmp_table_sizes_min,
 	m_tmp_table_sizes_max,
 	m_tmp_table_sizes_p99,
-	m_tmp_table_sizes_hg,
 	m_qc_hit_sum,
 	m_full_scan_sum,
 	m_full_join_sum,
@@ -424,33 +410,8 @@ const insertSQL = `
 	m_sort_rows_sum,
 	m_sort_scan_sum,
 	m_no_index_used_sum,
-	m_no_good_index_used_sum,
-	grpstr,
-	grpint,
-	labint.key,
-	labint.value
+	m_no_good_index_used_sum
    ) VALUES (
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
-	?,
 	?,
 	?,
 	?,
