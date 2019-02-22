@@ -8,8 +8,8 @@ SELECT
     MAX(m_query_time_max) AS m_query_time_max,
     AVG(m_query_time_p99) AS m_query_time_p99
 FROM queries
-WHERE (period_start > '2019-01-11 00:00:03')
-AND (period_start < '2019-01-17 23:59:51')
+WHERE (period_start > '2019-02-07 23:01:00')
+AND (period_start < '2019-02-14 22:59:58')
 AND (db_server IN ('db1', 'db2'))
 AND has(['label1', 'label2'], labels.value[indexOf(labels.key, 'key5')])
 
@@ -27,8 +27,8 @@ SELECT
     MAX(m_query_time_max) AS m_query_time_max,
     AVG(m_query_time_p99) AS m_query_time_p99
 FROM queries
-WHERE (period_start > '2019-01-11 00:00:03')
-AND (period_start < '2019-01-17 23:59:51')
+WHERE (period_start > '2019-02-07 23:01:00')
+AND (period_start < '2019-02-14 22:59:58')
 AND (db_server IN ('db1', 'db2'))
 AND has(['label1', 'label2'], labels.value[indexOf(labels.key, 'key5')])
 GROUP BY digest
@@ -46,8 +46,8 @@ SELECT
     MAX(m_query_time_max) AS m_query_time_max,
     AVG(m_query_time_p99) AS m_query_time_p99
 FROM queries
-WHERE (period_start > '2019-01-11 00:00:03')
-AND (period_start < '2019-01-17 23:59:51')
+WHERE (period_start > '2019-02-07 23:01:00')
+AND (period_start < '2019-02-14 22:59:58')
 AND (db_server IN ('db1', 'db2'))
 AND has(['label1', 'label2'], labels.value[indexOf(labels.key, 'key5')])
 GROUP BY db_schema
@@ -65,8 +65,8 @@ SELECT
     MAX(m_query_time_max) AS m_query_time_max,
     AVG(m_query_time_p99) AS m_query_time_p99
 FROM queries
-WHERE (period_start > '2019-01-11 00:00:03')
-AND (period_start < '2019-01-17 23:59:51')
+WHERE (period_start > '2019-02-07 23:01:00')
+AND (period_start < '2019-02-14 22:59:58')
 AND (db_server IN ('db1', 'db2'))
 AND has(['label1', 'label2'], labels.value[indexOf(labels.key, 'key5')])
 GROUP BY db_server
@@ -212,9 +212,66 @@ SUM(m_sort_scan_sum) AS m_sort_scan_sum,
 SUM(m_no_index_used_sum) AS m_no_index_used_sum,
 SUM(m_no_good_index_used_sum) AS m_no_good_index_used_sum
 FROM queries
-WHERE (period_start > '2019-01-11 00:00:03')
-AND (period_start < '2019-01-17 23:59:51')
+WHERE (period_start > '2019-02-07 23:01:00')
+AND (period_start < '2019-02-14 22:59:58')
 AND digest = '1D410B4BE5060972'
 AND (db_server IN ('db1', 'db2'))
 AND has(['label1', 'label2'], labels.value[indexOf(labels.key, 'key5')])
 GROUP BY digest;
+
+
+select min(period_start), max(period_start) from queries;
+
+
+SELECT
+digest,
+SUM(num_queries) AS num_queries,
+groupUniqArray(db_server) AS db_servers,
+groupUniqArray(db_schema) AS db_schemas,
+groupUniqArray(db_username) AS db_usernames,
+groupUniqArray(client_host) AS client_hosts
+FROM queries
+GROUP BY digest;
+
+
+SELECT
+digest,
+SUM(num_queries) AS num_queries,
+groupUniqArray(labels.key),
+groupUniqArray(labels.value),
+FROM queries
+GROUP BY digest;
+
+
+
+SELECT
+db_server,
+groupUniqArray(digest),
+SUM(num_queries) AS num_queries
+FROM queries
+GROUP BY db_server;
+
+
+select digest, count(*) as cnt, sum(num_queries)  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00' GROUP BY digest;
+select db_server, count(*) as cnt, sum(num_queries)  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00' GROUP BY db_server;
+select db_schema, count(*) as cnt, sum(num_queries)  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00' GROUP BY db_schema;
+select db_username, count(*) as cnt, sum(num_queries)  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00' GROUP BY db_username;
+select client_host, count(*) as cnt, sum(num_queries)  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00' GROUP BY client_host;
+
+
+select digest, client_host, db_server, db_username, client_host  from queries where period_start > '2019-02-08 13:29:00' AND period_start < '2019-02-08 13:30:00';
+
+
+SELECT
+    digest,
+    client_host,
+    db_server,
+    db_username,
+    client_host,
+    period_start,
+    num_queries
+FROM queries
+WHERE (period_start > '2019-02-08 13:29:00') AND (period_start < '2019-02-08 13:30:00');
+
+
+select num_queries from queries where num_queries > 2;

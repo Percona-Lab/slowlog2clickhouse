@@ -2,17 +2,6 @@
 
 
 [[projects]]
-  digest = "1:0c11e987235e8f37af4e9f24cca02754827d009e8b66cf24483b0006504f6045"
-  name = "github.com/jmoiron/sqlx"
-  packages = [
-    ".",
-    "reflectx",
-  ]
-  pruneopts = "NUT"
-  revision = "d161d7a76b5661016ad0b085869f77fd410f3e6a"
-  version = "v1.2.0"
-
-[[projects]]
   digest = "1:32c45107d229b1cf9129e56fe1fabc14c5cac0fc7ce1b0d51bf53bbfde7e84c3"
   name = "github.com/kshvakov/clickhouse"
   packages = [
@@ -29,8 +18,8 @@
   version = "v1.3.5"
 
 [[projects]]
-  branch = "master"
-  digest = "1:37e7d147e1ff52e3e305a39ba486f96fdf01ad53382ef7852c321b84838ec8b2"
+  branch = "PMM-3514-group-by-digest-user-host-db-server"
+  digest = "1:9a66d2b98a7649b0905b570480a66b06645315ed91f1f0a96711b042ede66ec4"
   name = "github.com/percona/go-mysql"
   packages = [
     "event",
@@ -39,13 +28,12 @@
     "query",
   ]
   pruneopts = "NUT"
-  revision = "fcc02662957597587e907ae09d5f61957de9cee9"
+  revision = "b9f78430ec7937d23152e7e8717193e36188e8a9"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
   input-imports = [
-    "github.com/jmoiron/sqlx",
     "github.com/kshvakov/clickhouse",
     "github.com/percona/go-mysql/event",
     "github.com/percona/go-mysql/log",
