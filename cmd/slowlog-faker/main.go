@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/kshvakov/clickhouse"
@@ -30,6 +31,7 @@ func main() {
 	logTimeStart := flag.String("logTimeStart", "2019-01-01 00:00:00", "Start fake time of query from")
 	repeatN := flag.Int("repeatN", 0, "Scan slowlog given times (when 0 will wait for new evens)")
 	dsn := flag.String("dsn", "clickhouse://127.0.0.1:9000?database=pmm", "DSN of ClickHouse Server")
+	openConns := flag.Int("open-conns", 10, "Number of open connections to ClickHouse")
 
 	flag.Parse()
 	log.SetOutput(os.Stderr)
@@ -47,60 +49,88 @@ func main() {
 		return
 	}
 
+	connect.SetConnMaxLifetime(0)
+	connect.SetMaxOpenConns(*openConns)
+	connect.SetMaxIdleConns(*openConns)
+
 	events := parseSlowLog(*slowLogPath, opt)
 	fmt.Println("Parsing slowlog: ", *slowLogPath, "...")
 	logStart, _ := time.Parse("2006-01-02 15:04:05", *logTimeStart)
 	periodNumber := 0
 	iteration := 1
 	fmt.Printf("Iteration %d of %d \n", iteration, *repeatN)
+
+	type AggregationResult struct {
+		sync.RWMutex
+		Buckets [][]interface{}
+	}
+
 	for {
-		i := 0
-		aggregator := event.NewAggregator(true, 0, 0)
-		prewTs := time.Time{}
-		periodStart := time.Time{}
+		bucketsLen := 0
+		aggregationResult := AggregationResult{}
+		var prewTs time.Time
+		var periodStart time.Time
+		queries := 0
+		for {
+			aggregator := event.NewAggregator(true, 0, 0)
+			i := 0
+			for e := range events {
+				fingerprint := query.Fingerprint(e.Query)
+				digest := query.Id(fingerprint)
+				// duration := time.Duration(iteration*(*incrementBySeconds) + *secondsOffset)
+				// e.Ts = e.Ts.Add(duration * time.Hour)
 
-		for e := range events {
-			fingerprint := query.Fingerprint(e.Query)
-			digest := query.Id(fingerprint)
-			// duration := time.Duration(iteration*(*incrementBySeconds) + *secondsOffset)
-			// e.Ts = e.Ts.Add(duration * time.Hour)
+				// e.Db = fmt.Sprintf("schema%v", zipf99.Uint64()+1)      // fake data
+				// e.User = fmt.Sprintf("user%v", zipf99.Uint64()+1)      // fake data
+				// e.Server = fmt.Sprintf("db%v", zipf9.Uint64()+1)       // fake data
+				// e.Host = fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1) // fake data
 
-			// e.Db = fmt.Sprintf("schema%v", zipf99.Uint64()+1)      // fake data
-			// e.User = fmt.Sprintf("user%v", zipf99.Uint64()+1)      // fake data
-			// e.Server = fmt.Sprintf("db%v", zipf9.Uint64()+1)       // fake data
-			// e.Host = fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1) // fake data
+				e.Db = fmt.Sprintf("schema%d", r.Intn(100))      // fake data 100
+				e.User = fmt.Sprintf("user%d", r.Intn(100))      // fake data 100
+				e.Host = fmt.Sprintf("10.11.12.%d", r.Intn(100)) // fake data 100
+				e.Server = fmt.Sprintf("db%d", r.Intn(10))       // fake data 10
+				e.LabelsKey = []string{fmt.Sprintf("label%d", r.Intn(10)), fmt.Sprintf("label%d", r.Intn(10)), fmt.Sprintf("label%d", r.Intn(10))}
+				e.LabelsValue = []string{fmt.Sprintf("value%d", r.Intn(100)), fmt.Sprintf("value%d", r.Intn(100)), fmt.Sprintf("value%d", r.Intn(100))}
 
-			e.Db = fmt.Sprintf("schema%d", r.Intn(100))      // fake data 100
-			e.User = fmt.Sprintf("user%d", r.Intn(100))      // fake data 100
-			e.Host = fmt.Sprintf("10.11.12.%d", r.Intn(100)) // fake data 100
-			e.Server = fmt.Sprintf("db%d", r.Intn(10))       // fake data 10
-			e.LabelsKey = []string{fmt.Sprintf("label%d", r.Intn(10)), fmt.Sprintf("label%d", r.Intn(10)), fmt.Sprintf("label%d", r.Intn(10))}
-			e.LabelsValue = []string{fmt.Sprintf("value%d", r.Intn(100)), fmt.Sprintf("value%d", r.Intn(100)), fmt.Sprintf("value%d", r.Intn(100))}
+				aggregator.AddEvent(e, digest, e.User, e.Host, e.Db, e.Server, fingerprint)
+				i++
 
-			aggregator.AddEvent(e, digest, e.User, e.Host, e.Db, e.Server, fingerprint)
+				// Pass last offset to restart reader when reached out end of slowlog.
+				opt.StartOffset = e.OffsetEnd
 
-			// Pass last offset to restart reader when reached out end of slowlog.
-			opt.StartOffset = e.OffsetEnd
+				if periodStart.IsZero() {
+					periodStart = logStart.Add(time.Duration(periodNumber) * time.Minute)
+				}
 
-			i++
+				if prewTs.IsZero() {
+					prewTs = e.Ts
+				}
 
-			if periodStart.IsZero() {
-				periodStart = logStart.Add(time.Duration(periodNumber) * time.Minute)
+				if e.Ts.Sub(prewTs).Seconds() > 59 {
+					prewTs = e.Ts
+					break
+				}
 			}
+			periodNumber++
+			res := aggregator.Finalize()
 
-			if prewTs.IsZero() {
-				prewTs = e.Ts
+			aggregationResult.RLock()
+			for _, v := range res.Class {
+				numQueries := float32(r.Intn(10000) + 1)
+				bucket := makeValues(v, periodStart, numQueries)
+				aggregationResult.Buckets = append(aggregationResult.Buckets, bucket)
 			}
-
-			if e.Ts.Sub(prewTs).Seconds() > 59 {
-				prewTs = e.Ts
+			aggregationResult.RUnlock()
+			queries += i
+			bucketsLen = len(aggregationResult.Buckets)
+			if i == 0 || bucketsLen > 200000 {
 				break
 			}
 		}
-		periodNumber++
+		fmt.Printf("bucketsLen %v \n", bucketsLen)
 
 		// No new events in slowlog. Nothing to save in ClickHouse. New iteration.
-		if i == 0 {
+		if queries == 0 {
 			fmt.Printf("Iteration %d of %d \n", iteration, *repeatN)
 			if iteration > *repeatN {
 				fmt.Printf("Done. Total Iterations %v \n", iteration)
@@ -112,56 +142,58 @@ func main() {
 			continue
 		}
 
-		res := aggregator.Finalize()
-
-		j := 0
-		classesLen := len(res.Class) - 1
-		var stmt *sql.Stmt
-		var tx *sql.Tx
-		for _, v := range res.Class {
-
-			// If key has suffix _time or _wait than field is TimeMetrics.
-			// For Boolean metrics exists only Sum.
-			// https://www.percona.com/doc/percona-server/5.7/diagnostics/slow_extended.html
-			// TimeMetrics: query_time, lock_time, rows_sent, innodb_io_r_wait, innodb_rec_lock_wait, innodb_queue_wait.
-			// NumberMetrics: rows_examined, rows_affected, rows_read, merge_passes, innodb_io_r_ops, innodb_io_r_bytes,
-			// innodb_pages_distinct, query_length, bytes_sent, tmp_tables, tmp_disk_tables, tmp_table_sizes.
-			// BooleanMetrics: qc_hit, full_scan, full_join, tmp_table, tmp_table_on_disk, filesort, filesort_on_disk,
-			// select_full_range_join, select_range, select_range_check, sort_range, sort_rows, sort_scan,
-			// no_index_used, no_good_index_used.
-
-			if j%100000 == 0 {
-				tx, err = connect.Begin()
-				if err != nil {
-					fmt.Printf("transaction begin error: %v", err)
-				}
-				stmt, err = tx.Prepare(insertSQL)
-				if err != nil {
-					fmt.Printf("prepare error: %v", err)
-				}
+		bulkSize := 100000
+		var wg sync.WaitGroup
+		for b := 0; b < bucketsLen; b++ {
+			s := b * bulkSize
+			e := (b + 1) * bulkSize
+			if e > bucketsLen {
+				e = bucketsLen
 			}
-			numQueries := float32(r.Intn(10000) + 1)
-			args := makeValues(v, periodStart, numQueries)
-			_, err = stmt.Exec(args...)
-			if err != nil {
-				fmt.Printf("exec error: %v", err)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				insertData(connect, aggregationResult.Buckets[s:e])
+			}()
+			if e == bucketsLen {
+				break
 			}
-
-			if j >= classesLen || j%100000 == 99999 {
-				err = stmt.Close()
-				if err != nil {
-					fmt.Printf("cannot close: %s", err.Error())
-				}
-
-				err = tx.Commit() // if Commit returns error update err
-				if err != nil {
-					fmt.Printf("cannot commit: %s", err.Error())
-				}
-			}
-			j++
 		}
-		fmt.Printf("%d/%d queries / query classes \n", i, j)
+		wg.Wait()
+		fmt.Printf("%d/%d queries / query classes \n", queries, bucketsLen)
 	}
+
+}
+
+func insertData(connect *sql.DB, buckets [][]interface{}) {
+	localBuckets := [][]interface{}{}
+	copy(localBuckets, buckets)
+	tx, err := connect.Begin()
+	if err != nil {
+		log.Panic(err)
+	}
+	stmt, err := tx.Prepare(insertSQL)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	for _, bucket := range buckets {
+		_, err = stmt.Exec(bucket...)
+		if err != nil {
+			log.Panic(err)
+		}
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		log.Panic(err)
+	}
+
+	err = tx.Commit() // if Commit returns error update err
+	if err != nil {
+		fmt.Printf("cannot commit: %s", err.Error())
+	}
+
 }
 
 // If key has suffix _time or _wait than field is TimeMetrics.
@@ -182,18 +214,19 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 		// errorsCodes = m.vals
 	}
 	args := []interface{}{
-		v.Id,                                  // digest
-		v.Fingerprint,                         // digest_text
-		v.Server,                              // db_server
-		v.Db,                                  // db_schema
-		v.User,                                // db_username
-		v.Host,                                // client_host
+		v.Id,                                  // queryid
+		v.Server,                              // d_server
+		v.Db,                                  // d_database
+		"",                                    // d_schema (postgress)
+		v.User,                                // d_username
+		v.Host,                                // d_client_host
 		v.LabelsKey,                           // labels_key
 		v.LabelsValue,                         // labels_value
 		agentUUID,                             // agent_uuid
 		"percona_server_log",                  // metrics_source
 		periodStart.Truncate(1 * time.Minute), // period_start
 		uint32(60),                            // period_length
+		v.Fingerprint,                         // fingerprint
 		v.Example.Query,                       // example
 		0,                                     // is_truncated
 		"",                                    // example_metrics
@@ -205,6 +238,16 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 		[]string{},                            // errors_count
 		numQueries,                            // num_queries
 	}
+
+	// If key has suffix _time or _wait than field is TimeMetrics.
+	// For Boolean metrics exists only Sum and Cnt.
+	// https://www.percona.com/doc/percona-server/5.7/diagnostics/slow_extended.html
+	// TimeMetrics: query_time, lock_time, rows_sent, innodb_io_r_wait, innodb_rec_lock_wait, innodb_queue_wait.
+	// NumberMetrics: rows_examined, rows_affected, rows_read, merge_passes, innodb_io_r_ops, innodb_io_r_bytes,
+	// innodb_pages_distinct, query_length, bytes_sent, tmp_tables, tmp_disk_tables, tmp_table_sizes.
+	// BooleanMetrics: qc_hit, full_scan, full_join, tmp_table, tmp_table_on_disk, filesort, filesort_on_disk,
+	// select_full_range_join, select_range, select_range_check, sort_range, sort_rows, sort_scan,
+	// no_index_used, no_good_index_used.
 
 	metricNames := []string{
 		"Query_time",
@@ -257,12 +300,20 @@ func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []int
 		"No_good_index_used",
 	}
 	for _, mName := range boolMetricNames {
+		cnt := float32(0)
 		sum := float32(0)
 		if m, ok := v.Metrics.BoolMetrics[mName]; ok {
+			cnt = float32(m.Cnt)
 			sum = float32(m.Sum)
 		}
-		args = append(args, sum)
+		args = append(args, cnt, sum)
 	}
+
+	args = append(args, []interface{}{
+		float32(0), float32(0), float32(0), float32(0), float32(0),
+		float32(0), float32(0), float32(0), float32(0), float32(0),
+		float32(0), float32(0), float32(0), float32(0), float32(0),
+	}...)
 	return args
 }
 
@@ -284,18 +335,19 @@ func parseSlowLog(filename string, o slowlog.Options) <-chan *slowlog.Event {
 const insertSQL = `
   INSERT INTO queries
   (
-	digest,
-	digest_text,
-	db_server,
-	db_schema,
-	db_username,
-	client_host,
+	queryid,
+	d_server,
+	d_database,
+	d_schema,
+	d_username,
+	d_client_host,
 	labels.key,
 	labels.value,
 	agent_uuid,
 	metrics_source,
 	period_start,
 	period_length,
+	fingerprint,
 	example,
 	is_truncated,
 	example_metrics,
@@ -396,22 +448,84 @@ const insertSQL = `
 	m_tmp_table_sizes_min,
 	m_tmp_table_sizes_max,
 	m_tmp_table_sizes_p99,
+	m_qc_hit_cnt,
 	m_qc_hit_sum,
+	m_full_scan_cnt,
 	m_full_scan_sum,
+	m_full_join_cnt,
 	m_full_join_sum,
+	m_tmp_table_cnt,
 	m_tmp_table_sum,
+	m_tmp_table_on_disk_cnt,
 	m_tmp_table_on_disk_sum,
+	m_filesort_cnt,
 	m_filesort_sum,
+	m_filesort_on_disk_cnt,
 	m_filesort_on_disk_sum,
+	m_select_full_range_join_cnt,
 	m_select_full_range_join_sum,
+	m_select_range_cnt,
 	m_select_range_sum,
+	m_select_range_check_cnt,
 	m_select_range_check_sum,
+	m_sort_range_cnt,
 	m_sort_range_sum,
+	m_sort_rows_cnt,
 	m_sort_rows_sum,
+	m_sort_scan_cnt,
 	m_sort_scan_sum,
+	m_no_index_used_cnt,
 	m_no_index_used_sum,
-	m_no_good_index_used_sum
+	m_no_good_index_used_cnt,
+	m_no_good_index_used_sum,
+	m_docs_returned_cnt,
+    m_docs_returned_sum,
+    m_docs_returned_min,
+    m_docs_returned_max,
+    m_docs_returned_p99,
+    m_response_length_cnt,
+    m_response_length_sum,
+    m_response_length_min,
+    m_response_length_max,
+    m_response_length_p99,
+    m_docs_scanned_cnt,
+    m_docs_scanned_sum,
+    m_docs_scanned_min,
+    m_docs_scanned_max,
+    m_docs_scanned_p99
    ) VALUES (
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
+	?,
 	?,
 	?,
 	?,

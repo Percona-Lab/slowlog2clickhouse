@@ -19,7 +19,7 @@
 
 [[projects]]
   branch = "PMM-3514-group-by-digest-user-host-db-server"
-  digest = "1:60421e1a7c47adc5ddf78268430e30fd4772ad95ee0a2059797c7caf8e535d59"
+  digest = "1:9a66d2b98a7649b0905b570480a66b06645315ed91f1f0a96711b042ede66ec4"
   name = "github.com/percona/go-mysql"
   packages = [
     "event",
@@ -28,7 +28,7 @@
     "query",
   ]
   pruneopts = "NUT"
-  revision = "bfdac174bddc87976a4527534bd70df901ee60c1"
+  revision = "b9f78430ec7937d23152e7e8717193e36188e8a9"
 
 [solve-meta]
   analyzer-name = "dep"
