@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/kshvakov/clickhouse"
@@ -32,6 +31,7 @@ func main() {
 	repeatN := flag.Int("repeatN", 0, "Scan slowlog given times (when 0 will wait for new evens)")
 	dsn := flag.String("dsn", "clickhouse://127.0.0.1:9000?database=pmm", "DSN of ClickHouse Server")
 	openConns := flag.Int("open-conns", 10, "Number of open connections to ClickHouse")
+	maxRandomNumQueries := flag.Int("max-rand-num-queries", 10000, "Maximum of random num_queries, if 0 - num_queries from slow log")
 
 	flag.Parse()
 	log.SetOutput(os.Stderr)
@@ -60,16 +60,14 @@ func main() {
 	iteration := 1
 	fmt.Printf("Iteration %d of %d \n", iteration, *repeatN)
 
-	type AggregationResult struct {
-		sync.RWMutex
-		Buckets [][]interface{}
+	var periodStart time.Time
+	if periodStart.IsZero() {
+		periodStart = logStart.Add(time.Duration(periodNumber) * time.Minute)
 	}
 
 	for {
 		bucketsLen := 0
-		aggregationResult := AggregationResult{}
 		var prewTs time.Time
-		var periodStart time.Time
 		queries := 0
 		for {
 			aggregator := event.NewAggregator(true, 0, 0)
@@ -77,13 +75,6 @@ func main() {
 			for e := range events {
 				fingerprint := query.Fingerprint(e.Query)
 				digest := query.Id(fingerprint)
-				// duration := time.Duration(iteration*(*incrementBySeconds) + *secondsOffset)
-				// e.Ts = e.Ts.Add(duration * time.Hour)
-
-				// e.Db = fmt.Sprintf("schema%v", zipf99.Uint64()+1)      // fake data
-				// e.User = fmt.Sprintf("user%v", zipf99.Uint64()+1)      // fake data
-				// e.Server = fmt.Sprintf("db%v", zipf9.Uint64()+1)       // fake data
-				// e.Host = fmt.Sprintf("10.11.12.%v", zipf99.Uint64()+1) // fake data
 
 				e.Db = fmt.Sprintf("schema%d", r.Intn(100))      // fake data 100
 				e.User = fmt.Sprintf("user%d", r.Intn(100))      // fake data 100
@@ -98,36 +89,45 @@ func main() {
 				// Pass last offset to restart reader when reached out end of slowlog.
 				opt.StartOffset = e.OffsetEnd
 
-				if periodStart.IsZero() {
-					periodStart = logStart.Add(time.Duration(periodNumber) * time.Minute)
-				}
-
 				if prewTs.IsZero() {
 					prewTs = e.Ts
 				}
 
 				if e.Ts.Sub(prewTs).Seconds() > 59 {
 					prewTs = e.Ts
+					periodStart = logStart.Add(time.Duration(periodNumber) * time.Minute)
+					periodNumber++
 					break
 				}
 			}
-			periodNumber++
 			res := aggregator.Finalize()
 
-			aggregationResult.RLock()
+			buckets := [][]interface{}{}
 			for _, v := range res.Class {
-				numQueries := float32(r.Intn(10000) + 1)
+				numQueries := float32(v.TotalQueries)
+				if *maxRandomNumQueries > 0 {
+					numQueries = float32(r.Intn(10000) + 1)
+				}
 				bucket := makeValues(v, periodStart, numQueries)
-				aggregationResult.Buckets = append(aggregationResult.Buckets, bucket)
+				buckets = append(buckets, bucket)
+				bucketsLen = len(buckets)
+				if bucketsLen > 10000 {
+					fmt.Printf("buckets: %v for period: %v \n", bucketsLen, periodStart)
+					insertData(connect, buckets)
+				}
 			}
-			aggregationResult.RUnlock()
+			if bucketsLen > 0 {
+				fmt.Printf("buckets: %v for period: %v \n", bucketsLen, periodStart)
+				insertData(connect, buckets)
+			}
+
 			queries += i
-			bucketsLen = len(aggregationResult.Buckets)
-			if i == 0 || bucketsLen > 200000 {
+
+			if i == 0 {
 				break
 			}
+
 		}
-		fmt.Printf("bucketsLen %v \n", bucketsLen)
 
 		// No new events in slowlog. Nothing to save in ClickHouse. New iteration.
 		if queries == 0 {
@@ -142,24 +142,27 @@ func main() {
 			continue
 		}
 
-		bulkSize := 100000
-		var wg sync.WaitGroup
-		for b := 0; b < bucketsLen; b++ {
-			s := b * bulkSize
-			e := (b + 1) * bulkSize
-			if e > bucketsLen {
-				e = bucketsLen
+		/*
+			// TODO: fails too often - need to investigate memory usage.
+			bulkSize := 100000
+			var wg sync.WaitGroup
+			for b := 0; b < bucketsLen; b++ {
+				s := b * bulkSize
+				e := (b + 1) * bulkSize
+				if e > bucketsLen {
+					e = bucketsLen
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					insertData(connect, aggregationResult.Buckets[s:e])
+				}()
+				if e == bucketsLen {
+					break
+				}
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				insertData(connect, aggregationResult.Buckets[s:e])
-			}()
-			if e == bucketsLen {
-				break
-			}
-		}
-		wg.Wait()
+			wg.Wait()
+		*/
 		fmt.Printf("%d/%d queries / query classes \n", queries, bucketsLen)
 	}
 
@@ -206,11 +209,9 @@ func insertData(connect *sql.DB, buckets [][]interface{}) {
 // select_full_range_join, select_range, select_range_check, sort_range, sort_rows, sort_scan,
 // no_index_used, no_good_index_used.
 func makeValues(v *event.Class, periodStart time.Time, numQueries float32) []interface{} {
-
 	numQueriesWithErrors := float32(0)
 	if m, ok := v.Metrics.NumberMetrics["Last_errno"]; ok {
 		numQueriesWithErrors = float32(m.Cnt)
-		// fmt.Printf("\n\nLast_errno: %+v \n\n", m)
 		// errorsCodes = m.vals
 	}
 	args := []interface{}{

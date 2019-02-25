@@ -17,7 +17,9 @@ ps-client:
 build:
 	go build -o bin/slowlogfaker cmd/slowlog-faker/main.go
 	go build -o bin/slowlogloader cmd/slowlog-loader/main.go
+	go build -o bin/mongofaker cmd/mongo-faker/main.go
 
 build-linux:
 	GOOS=linux go build -o bin/slowlogfaker cmd/slowlog-faker/main.go
 	GOOS=linux go build -o bin/slowlogloader cmd/slowlog-loader/main.go
+	GOOS=linux go build -o bin/mongofaker cmd/mongo-faker/main.go
