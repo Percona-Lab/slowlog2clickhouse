@@ -39,7 +39,7 @@ func (c *mutexCounter) Value() (x int) {
 func main() {
 	logTimeStart := flag.String("logTimeStart", "2019-01-01 00:00:00", "Start fake time of query from")
 	durationN := flag.Int("durationN", 60, "Generate N minutes")
-	rowsPerMin := flag.Int("rowsPerMin", 100000, "Rows per minute (+/- 20%)")
+	rowsPerMin := flag.Int("rowsPerMin", 10000, "Rows per minute (+/- 20%)")
 	dsn := flag.String("dsn", "clickhouse://127.0.0.1:9000?database=pmm&read_timeout=10&write_timeout=200", "DSN of ClickHouse Server")
 	openConns := flag.Int("open-conns", 10, "Number of open connections to ClickHouse")
 
@@ -67,29 +67,29 @@ func main() {
 	processors := runtime.GOMAXPROCS(0)
 	counter := mutexCounter{}
 	rowsDistrib := int(math.Round(float64(*rowsPerMin) * 0.2))
-	// log10 := int(math.Round(math.Log10(float64(*rowsPerMin)))
+	chunks := 1
+	if *rowsPerMin > 100000 {
+		chunks = *rowsPerMin / 100000
+	}
 	for counter.Value() < *durationN {
-		fmt.Println("counter: ", counter.Value())
 		var wg sync.WaitGroup
 		for i := 0; i < processors; i++ {
 			wg.Add(1)
 			go func() {
-				var m runtime.MemStats
 				r := rand.New(rand.NewSource(time.Now().UnixNano()))
 				bucketsInMinute := r.Intn(rowsDistrib) + *rowsPerMin
 				counter.Add(1)
 				periodStart := logStart.Add(time.Duration(counter.Value()) * time.Minute)
-				fmt.Println("periodStart", periodStart)
-				for i := 0; i < 10000; i++ {
+				for i := 0; i < chunks; i++ {
 					buckets := [][]interface{}{}
-					for j := 0; j < bucketsInMinute/10000; j++ {
+					for j := 0; j < bucketsInMinute/chunks; j++ {
 						bucket := makeValues(periodStart, r)
 						buckets = append(buckets, bucket)
 					}
 					insertData(connect, buckets)
+					fmt.Printf("buckets: %v for period: %v \n", len(buckets), periodStart)
+					time.Sleep(5 * time.Second)
 				}
-				runtime.ReadMemStats(&m)
-				fmt.Printf("Sys: %dGB \n", m.Sys/(1024*1024*1024))
 				wg.Done()
 			}()
 		}
